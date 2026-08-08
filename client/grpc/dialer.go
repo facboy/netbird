@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"os"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -18,12 +20,42 @@ import (
 	"github.com/netbirdio/netbird/util/embeddedroots"
 )
 
+const (
+	// EnvTLSInsecureSkipVerify allows skipping TLS certificate verification.
+	// When set to "true", disables certificate expiry and hostname verification.
+	// WARNING: This is ONLY for development/testing. Never use in production.
+	// Value: "true" or "false" (default: "false")
+	EnvTLSInsecureSkipVerify = "NB_TLS_INSECURE_SKIP_VERIFY"
+)
+
 // Backoff returns a backoff configuration for gRPC calls
 func Backoff(ctx context.Context) backoff.BackOff {
 	b := backoff.NewExponentialBackOff()
 	b.MaxElapsedTime = 10 * time.Second
 	b.Clock = backoff.SystemClock
 	return backoff.WithContext(b, ctx)
+}
+
+// insecureSkipVerifyEnabled checks if TLS certificate verification should be skipped.
+func insecureSkipVerifyEnabled() bool {
+	val := os.Getenv(EnvTLSInsecureSkipVerify)
+	if val == "" {
+		return false
+	}
+
+	skipVerify, err := strconv.ParseBool(val)
+	if err != nil {
+		log.Warnf("failed to parse %s: %v, using default (false)", EnvTLSInsecureSkipVerify, err)
+		return false
+	}
+
+	if skipVerify {
+		log.Warnf("⚠️  WARNING: TLS certificate verification is DISABLED via %s. "+
+			"This is only for development/testing and leaves the client vulnerable to MITM attacks. "+
+			"Never use this in production.", EnvTLSInsecureSkipVerify)
+	}
+
+	return skipVerify
 }
 
 // CreateConnection creates a gRPC client connection with the appropriate transport options.
@@ -38,9 +70,17 @@ func CreateConnection(ctx context.Context, addr string, tlsEnabled bool, compone
 			certPool = embeddedroots.Get()
 		}
 
-		transportOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+		tlsConfig := &tls.Config{
 			RootCAs: certPool,
-		}))
+		}
+
+		// Allow disabling certificate verification via environment variable.
+		// WARNING: This is ONLY for development/testing.
+		if insecureSkipVerifyEnabled() {
+			tlsConfig.InsecureSkipVerify = true
+		}
+
+		transportOption = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 
 	connCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
